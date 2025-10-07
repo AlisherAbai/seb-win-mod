@@ -1,8 +1,9 @@
-name: Build SEB Windows
+name: Build SEB for Windows
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
 
 jobs:
@@ -10,25 +11,31 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 6.0.x
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
 
-    - name: Install WiX Toolset
-      run: choco install wixtoolset -y
+      - name: Install WiX Toolset 3.14
+        run: |
+          choco install wixtoolset --version=3.14.1.20250415 -y
 
-    - name: Set WiX path environment variable
-      run: |
-        echo "WIX=C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "WiX Toolset path set to $env:WIX"
+      - name: Verify WiX installation
+        run: |
+          & "C:\Program Files (x86)\WiX Toolset v3.14\bin\candle.exe" -?
+          & "C:\Program Files (x86)\WiX Toolset v3.14\bin\light.exe" -?
 
-    - name: Build SEB solution
-      run: dotnet build SafeExamBrowser.sln -c Release
+      - name: Build SEB
+        run: |
+          dotnet restore SafeExamBrowser.sln
+          dotnet build SafeExamBrowser.sln -c Release
+          dotnet publish SafeExamBrowser.Runtime/SafeExamBrowser.Runtime.csproj -r win-x64 -p:PublishSingleFile=true -p:Configuration=Release --output ./build
 
-    - name: Publish SEB
-      run: dotnet publish SafeExamBrowser.sln -r win-x64 -p:PublishSingleFile=true -p:Configuration=Release --output ./build
-
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SEB-Windows
+          path: ./build/
