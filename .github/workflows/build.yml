@@ -1,85 +1,91 @@
-name: Build SEB (MSBuild + WiX)
+name: Build SEB
 
 on:
-  workflow_dispatch:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CONFIGURATION: Release
+  BUILD_OUTPUT: build
 
 jobs:
-  build:
+  build-windows:
+    name: Build on Windows
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repo
+    - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
 
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Install WiX Toolset (if not present)
-      run: choco install wixtoolset -y
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.fsproj', '**/packages.lock.json') }}
+        restore-keys: |
+          nuget-${{ runner.os }}-
 
-    - name: Export WIX env (so Setup.wixproj can find WiX)
+    - name: Restore NuGet / dotnet packages
+      run: dotnet restore SafeExamBrowser.sln
+
+    - name: Build solution with MSBuild
+      run: msbuild SafeExamBrowser.sln /p:Configuration=${{ env.CONFIGURATION }} /m
+
+    - name: Run unit tests
+      run: |
+        dotnet test SafeExamBrowser.sln --configuration ${{ env.CONFIGURATION }} --no-build
+      continue-on-error: false
+
+    - name: Publish single-file self-contained exe (win-x64)
+      run: |
+        dotnet publish SafeExamBrowser.sln -r win-x64 -p:PublishSingleFile=true -p:Configuration=${{ env.CONFIGURATION }} -p:PublishTrimmed=false --self-contained true -o ${{ env.BUILD_OUTPUT }}
+
+    - name: Show published files
+      run: dir ${{ env.BUILD_OUTPUT }}
+
+    - name: Install WiX Toolset (for building MSI installers)
+      if: always()
+      run: choco install wixtoolset --yes
+
+    - name: Build WiX installer if project exists
       shell: pwsh
       run: |
-        # IMPORTANT: do NOT include the trailing \bin here (wix.targets will append \bin)
-        $wixRoot = 'C:\Program Files (x86)\WiX Toolset v3.14'
-        if (Test-Path $wixRoot) {
-          Write-Host "Found WiX at $wixRoot"
-          "WIX=$wixRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
-          # add actual bin to PATH so heat.exe is available
-          "PATH=$($wixRoot)\bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
+        if (Test-Path -Path "Setup/Setup.wixproj") {
+          Write-Host "Found Setup/Setup.wixproj - building WiX installer..."
+          msbuild Setup/Setup.wixproj /p:Configuration=${{ env.CONFIGURATION }} /m
+          # copy resulting installer(s) to artifact folder if present
+          $wixOut = "Setup\bin\${{ env.CONFIGURATION }}"
+          if (Test-Path -Path $wixOut) {
+            Copy-Item -Path (Join-Path $wixOut '*') -Destination ${{ env.BUILD_OUTPUT }} -Recurse -Force
+          }
         } else {
-          Write-Host "WiX path not found at $wixRoot"
+          Write-Host "No Setup/Setup.wixproj found - skipping WiX step."
         }
-
-    - name: Setup code signing (optional)
-      id: setup_sign
-      shell: pwsh
-      # This step runs only if you've set the repo secret CODESIGN_PFX (base64 of pfx).
-      if: ${{ secrets.CODESIGN_PFX }}
-      run: |
-        Write-Host "Code signing PFX secret present — enabling signing."
-        # Create temporary pfx file from base64 secret
-        $pfxBase64 = "${{ secrets.CODESIGN_PFX }}"
-        $pfxBytes = [System.Convert]::FromBase64String($pfxBase64)
-        $pfxPath = Join-Path $env:TEMP "codesign.pfx"
-        [System.IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-        Write-Host "Wrote PFX to $pfxPath"
-
-        # Import to Personal (LocalMachine) store so signtool can see it.
-        $securePass = ConvertTo-SecureString "${{ secrets.CODESIGN_PASSWORD }}" -AsPlainText -Force
-        Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\LocalMachine\My -Password $securePass | Out-Null
-        Write-Host "Imported PFX into LocalMachine\My"
-
-        # Tell the build to attempt signing
-        "SIGN_BINARIES=true" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-    - name: Default: Disable signing on CI (if not set by previous step)
-      shell: pwsh
-      if: ${{ !secrets.CODESIGN_PFX }}
-      run: |
-        "SIGN_BINARIES=false" | Out-File -FilePath $env:GITHUB_ENV -Append
-        Write-Host "SIGN_BINARIES=false (no code signing secret found)"
-
-    - name: Restore NuGet packages
-      run: nuget restore SafeExamBrowser.sln
-
-    - name: Build solution
-      run: msbuild SafeExamBrowser.sln /p:Configuration=Release /m
-
-    - name: Collect built executables
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path build -Force | Out-Null
-        Get-ChildItem -Path . -Include *.exe,*.msi,*.dll -Recurse |
-          Where-Object { $_.FullName -notmatch '\\packages\\' } |
-          ForEach-Object { Copy-Item $_.FullName -Destination build -Force }
-        Write-Host "Copied executables:"
-        Get-ChildItem build
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: SEB-Binaries
-        path: ./build
+        name: SEB-build-${{ github.run_id }}
+        path: ${{ env.BUILD_OUTPUT }}
+        retention-days: 7
+
+    - name: Upload test results (optional)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ github.run_id }}
+        path: '**/TestResults/**/*.trx'
+        retention-days: 7
