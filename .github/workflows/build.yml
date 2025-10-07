@@ -1,33 +1,34 @@
-name: Build SEB Installer
+name: Build SEB Windows
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout
+    - name: Checkout repository
       uses: actions/checkout@v4
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 8.0.x
+        dotnet-version: 6.0.x
 
     - name: Install WiX Toolset
       run: choco install wixtoolset -y
 
+    - name: Set WiX path environment variable
+      run: |
+        echo "WIX=C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "WiX Toolset path set to $env:WIX"
 
-    - name: Restore NuGet packages
-      run: nuget restore SafeExamBrowser.sln
+    - name: Build SEB solution
+      run: dotnet build SafeExamBrowser.sln -c Release
 
-    - name: Build SEB Installer
+    - name: Publish SEB
       run: dotnet publish SafeExamBrowser.sln -r win-x64 -p:PublishSingleFile=true -p:Configuration=Release --output ./build
 
-    - name: Upload Installer
-      uses: actions/upload-artifact@v4
-      with:
-        name: SEB-Installer
-        path: ./build
