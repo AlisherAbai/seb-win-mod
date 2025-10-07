@@ -1,41 +1,52 @@
-name: Build SEB for Windows
+name: Build SEB (MSBuild + WiX)
 
 on:
+  workflow_dispatch:
   push:
-    branches:
-      - main
-  pull_request:
+    branches: [ main ]
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.x
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
 
-      - name: Install WiX Toolset 3.14
-        run: |
-          choco install wixtoolset --version=3.14.1.20250415 -y
+    - name: Install WiX Toolset (if not present)
+      run: choco install wixtoolset -y
 
-      - name: Verify WiX installation
-        run: |
-          & "C:\Program Files (x86)\WiX Toolset v3.14\bin\candle.exe" -?
-          & "C:\Program Files (x86)\WiX Toolset v3.14\bin\light.exe" -?
+    - name: Export WIX env (so Setup.wixproj can find WiX)
+      shell: pwsh
+      run: |
+        $wixPath = 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
+        if (Test-Path $wixPath) {
+          "WIX=$wixPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+        } else {
+          Write-Host "WiX path not found."
+        }
 
-      - name: Build SEB
-        run: |
-          dotnet restore SafeExamBrowser.sln
-          dotnet build SafeExamBrowser.sln -c Release
-          dotnet publish SafeExamBrowser.Runtime/SafeExamBrowser.Runtime.csproj -r win-x64 -p:PublishSingleFile=true -p:Configuration=Release --output ./build
+    - name: Restore NuGet packages
+      run: nuget restore SafeExamBrowser.sln
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: SEB-Windows
-          path: ./build/
+    - name: Build solution
+      run: msbuild SafeExamBrowser.sln /p:Configuration=Release /m
+
+    - name: Collect built executables
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path build -Force | Out-Null
+        Get-ChildItem -Path . -Include *.exe,*.msi -Recurse |
+          Where-Object { $_.FullName -notmatch '\\packages\\' } |
+          ForEach-Object { Copy-Item $_.FullName -Destination build -Force }
+        Write-Host "Copied executables:"
+        Get-ChildItem build
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: SEB-Binaries
+        path: ./build
