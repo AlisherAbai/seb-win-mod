@@ -26,17 +26,9 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
-      
-    - name: Install WiX Toolset
-      run: |
-        choco install wixtoolset -y
-    
+
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
-
-    - name: Install WiX Toolset (needed for Setup.wixproj)
-      run: choco install wixtoolset --yes
-      shell: pwsh
 
     - name: Cache NuGet packages
       uses: actions/cache@v4
@@ -52,11 +44,9 @@ jobs:
     - name: Build solution with MSBuild
       run: msbuild SafeExamBrowser.sln /p:Configuration=${{ env.CONFIGURATION }} /m
 
-    - name: Run unit tests (produce TRX)
+    - name: Run unit tests
       run: |
-        mkdir -Force ${{ env.BUILD_OUTPUT }}\TestResults
-        dotnet test SafeExamBrowser.sln --configuration ${{ env.CONFIGURATION }} --no-build --logger "trx;LogFileName=tests.trx" --results-directory ${{ env.BUILD_OUTPUT }}\TestResults
-      shell: pwsh
+        dotnet test SafeExamBrowser.sln --configuration ${{ env.CONFIGURATION }} --no-build
       continue-on-error: false
 
     - name: Publish single-file self-contained exe (win-x64)
@@ -66,12 +56,17 @@ jobs:
     - name: Show published files
       run: dir ${{ env.BUILD_OUTPUT }}
 
+    - name: Install WiX Toolset (for building MSI installers)
+      if: always()
+      run: choco install wixtoolset --yes
+
     - name: Build WiX installer if project exists
       shell: pwsh
       run: |
         if (Test-Path -Path "Setup/Setup.wixproj") {
           Write-Host "Found Setup/Setup.wixproj - building WiX installer..."
           msbuild Setup/Setup.wixproj /p:Configuration=${{ env.CONFIGURATION }} /m
+          # copy resulting installer(s) to artifact folder if present
           $wixOut = "Setup\bin\${{ env.CONFIGURATION }}"
           if (Test-Path -Path $wixOut) {
             Copy-Item -Path (Join-Path $wixOut '*') -Destination ${{ env.BUILD_OUTPUT }} -Recurse -Force
@@ -87,10 +82,10 @@ jobs:
         path: ${{ env.BUILD_OUTPUT }}
         retention-days: 7
 
-    - name: Upload test results
+    - name: Upload test results (optional)
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: test-results-${{ github.run_id }}
-        path: ${{ env.BUILD_OUTPUT }}\TestResults\**\*.trx
+        path: '**/TestResults/**/*.trx'
         retention-days: 7
