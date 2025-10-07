@@ -1,4 +1,4 @@
-name: Build SEB Windows EXE
+name: Build SEB Installer
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
 
     - name: Setup .NET
@@ -16,14 +16,18 @@ jobs:
       with:
         dotnet-version: 8.0.x
 
+    - name: Install WiX Toolset
+      run: |
+        choco install wixtoolset --version=3.11.2 -y
+
     - name: Restore NuGet packages
       run: nuget restore SafeExamBrowser.sln
 
-    - name: Build project
+    - name: Build SEB Installer
       run: dotnet publish SafeExamBrowser.sln -r win-x64 -p:PublishSingleFile=true -p:Configuration=Release --output ./build
 
-    - name: Upload EXE artifact
+    - name: Upload Installer
       uses: actions/upload-artifact@v4
       with:
-        name: SEB-Windows-Build
+        name: SEB-Installer
         path: ./build
