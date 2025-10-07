@@ -30,6 +30,28 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
+    # --- Установка WiX до restore, с проверкой ---
+    - name: Install WiX Toolset (choco)
+      id: install-wix
+      shell: pwsh
+      run: |
+        Write-Host "Installing WiX toolset..."
+        choco install wixtoolset --yes --no-progress
+        # refreshenv доступен если chocolatey tools helper установлен
+        if (Get-Command refreshenv -ErrorAction SilentlyContinue) {
+          refreshenv
+        }
+        # проверим наличие основных бинарников WiX (candle.exe)
+        $candle = Get-Command candle.exe -ErrorAction SilentlyContinue
+        if ($null -ne $candle) {
+          Write-Host "WiX appears installed at: $($candle.Path)"
+          Write-Output "wix_installed=true" >> $env:GITHUB_OUTPUT
+        } else {
+          Write-Warning "WiX not found after install. Will fallback to building without Setup.wixproj."
+          Write-Output "wix_installed=false" >> $env:GITHUB_OUTPUT
+        }
+
+    # --- Кеш NuGet ---
     - name: Cache NuGet packages
       uses: actions/cache@v4
       with:
@@ -38,43 +60,79 @@ jobs:
         restore-keys: |
           nuget-${{ runner.os }}-
 
-    - name: Restore NuGet / dotnet packages
-      run: dotnet restore SafeExamBrowser.sln
-
-    - name: Build solution with MSBuild
-      run: msbuild SafeExamBrowser.sln /p:Configuration=${{ env.CONFIGURATION }} /m
-
-    - name: Run unit tests
+    # --- Восстановление пакетов ---
+    # Если WiX не установлен, временно удаляем Setup/Setup.wixproj из .sln в раннере (локально)
+    - name: Restore NuGet / dotnet packages (robust)
+      shell: pwsh
       run: |
-        dotnet test SafeExamBrowser.sln --configuration ${{ env.CONFIGURATION }} --no-build
+        Write-Host "wix_installed=${{ steps.install-wix.outputs.wix_installed }}"
+        if ('${{ steps.install-wix.outputs.wix_installed }}' -eq 'false') {
+          if (Test-Path -Path "Setup/Setup.wixproj") {
+            Write-Host "Removing Setup/Setup.wixproj from solution temporarily to allow restore..."
+            dotnet sln remove Setup/Setup.wixproj || Write-Host "dotnet sln remove returned non-zero or project not in sln; continuing."
+            Write-Host "Listing projects in solution after removal:"
+            dotnet sln list
+          } else {
+            Write-Host "Setup/Setup.wixproj not present in repo - nothing to remove."
+          }
+        } else {
+          Write-Host "WiX installed; not removing Setup project."
+        }
+
+        Write-Host "Running dotnet restore for solution (or reduced sln)..."
+        dotnet restore SafeExamBrowser.sln
+
+    # --- Сборка проектов (все кроме Setup если мы удалили его) ---
+    - name: Build solution with MSBuild (or per-project)
+      shell: pwsh
+      run: |
+        Write-Host "Building solution with msbuild..."
+        msbuild SafeExamBrowser.sln /p:Configuration=${{ env.CONFIGURATION }} /m
+
+    # --- Юнит-тесты (TRX) ---
+    - name: Run unit tests (produce TRX)
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "${{ env.BUILD_OUTPUT }}/TestResults" | Out-Null
+        dotnet test SafeExamBrowser.sln --configuration ${{ env.CONFIGURATION }} --no-build --logger "trx;LogFileName=tests.trx" --results-directory "${{ env.BUILD_OUTPUT }}/TestResults"
       continue-on-error: false
 
+    # --- Публикация single-file exe ---
     - name: Publish single-file self-contained exe (win-x64)
+      shell: pwsh
       run: |
         dotnet publish SafeExamBrowser.sln -r win-x64 -p:PublishSingleFile=true -p:Configuration=${{ env.CONFIGURATION }} -p:PublishTrimmed=false --self-contained true -o ${{ env.BUILD_OUTPUT }}
 
     - name: Show published files
-      run: dir ${{ env.BUILD_OUTPUT }}
+      shell: pwsh
+      run: |
+        if (Test-Path -Path "${{ env.BUILD_OUTPUT }}") {
+          Write-Host "Build output:"
+          Get-ChildItem -Path "${{ env.BUILD_OUTPUT }}" -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
+        } else {
+          Write-Host "No build output folder found."
+        }
 
-    - name: Install WiX Toolset (for building MSI installers)
-      if: always()
-      run: choco install wixtoolset --yes
-
-    - name: Build WiX installer if project exists
+    # --- Если WiX установлен, собираем Setup.wixproj отдельно и копируем MSI/инсталляторы ---
+    - name: Build Setup/Setup.wixproj (only if WiX installed)
+      if: ${{ steps.install-wix.outputs.wix_installed == 'true' }}
       shell: pwsh
       run: |
         if (Test-Path -Path "Setup/Setup.wixproj") {
-          Write-Host "Found Setup/Setup.wixproj - building WiX installer..."
+          Write-Host "Building Setup/Setup.wixproj (WiX is present)..."
           msbuild Setup/Setup.wixproj /p:Configuration=${{ env.CONFIGURATION }} /m
-          # copy resulting installer(s) to artifact folder if present
-          $wixOut = "Setup\bin\${{ env.CONFIGURATION }}"
+          $wixOut = "Setup/bin/${{ env.CONFIGURATION }}"
           if (Test-Path -Path $wixOut) {
+            Write-Host "Copying WiX output to build folder..."
             Copy-Item -Path (Join-Path $wixOut '*') -Destination ${{ env.BUILD_OUTPUT }} -Recurse -Force
+          } else {
+            Write-Warning "Expected WiX output folder not found: $wixOut"
           }
         } else {
-          Write-Host "No Setup/Setup.wixproj found - skipping WiX step."
+          Write-Host "No Setup/Setup.wixproj in repo; skipping."
         }
 
+    # --- Артефакты ---
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -82,10 +140,10 @@ jobs:
         path: ${{ env.BUILD_OUTPUT }}
         retention-days: 7
 
-    - name: Upload test results (optional)
+    - name: Upload test results
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: test-results-${{ github.run_id }}
-        path: '**/TestResults/**/*.trx'
+        path: ${{ env.BUILD_OUTPUT }}/TestResults/**/*.trx
         retention-days: 7
