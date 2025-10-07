@@ -50,7 +50,7 @@ jobs:
         # Import to Personal (LocalMachine) store so signtool can see it.
         $securePass = ConvertTo-SecureString "${{ secrets.CODESIGN_PASSWORD }}" -AsPlainText -Force
         Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\LocalMachine\My -Password $securePass | Out-Null
-        Write-Host "Imported PFX into LocalMachine\\My"
+        Write-Host "Imported PFX into LocalMachine\My"
 
         # Tell the build to attempt signing
         "SIGN_BINARIES=true" | Out-File -FilePath $env:GITHUB_ENV -Append
