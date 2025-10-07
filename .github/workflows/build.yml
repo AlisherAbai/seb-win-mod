@@ -22,12 +22,45 @@ jobs:
     - name: Export WIX env (so Setup.wixproj can find WiX)
       shell: pwsh
       run: |
-        $wixPath = 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
-        if (Test-Path $wixPath) {
-          "WIX=$wixPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+        # IMPORTANT: do NOT include the trailing \bin here (wix.targets will append \bin)
+        $wixRoot = 'C:\Program Files (x86)\WiX Toolset v3.14'
+        if (Test-Path $wixRoot) {
+          Write-Host "Found WiX at $wixRoot"
+          "WIX=$wixRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # add actual bin to PATH so heat.exe is available
+          "PATH=$($wixRoot)\bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
         } else {
-          Write-Host "WiX path not found."
+          Write-Host "WiX path not found at $wixRoot"
         }
+
+    - name: Setup code signing (optional)
+      id: setup_sign
+      shell: pwsh
+      # This step runs only if you've set the repo secret CODESIGN_PFX (base64 of pfx).
+      if: ${{ secrets.CODESIGN_PFX }}
+      run: |
+        Write-Host "Code signing PFX secret present — enabling signing."
+        # Create temporary pfx file from base64 secret
+        $pfxBase64 = "${{ secrets.CODESIGN_PFX }}"
+        $pfxBytes = [System.Convert]::FromBase64String($pfxBase64)
+        $pfxPath = Join-Path $env:TEMP "codesign.pfx"
+        [System.IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+        Write-Host "Wrote PFX to $pfxPath"
+
+        # Import to Personal (LocalMachine) store so signtool can see it.
+        $securePass = ConvertTo-SecureString "${{ secrets.CODESIGN_PASSWORD }}" -AsPlainText -Force
+        Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\LocalMachine\My -Password $securePass | Out-Null
+        Write-Host "Imported PFX into LocalMachine\\My"
+
+        # Tell the build to attempt signing
+        "SIGN_BINARIES=true" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+    - name: Default: Disable signing on CI (if not set by previous step)
+      shell: pwsh
+      if: ${{ !secrets.CODESIGN_PFX }}
+      run: |
+        "SIGN_BINARIES=false" | Out-File -FilePath $env:GITHUB_ENV -Append
+        Write-Host "SIGN_BINARIES=false (no code signing secret found)"
 
     - name: Restore NuGet packages
       run: nuget restore SafeExamBrowser.sln
@@ -39,7 +72,7 @@ jobs:
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Path build -Force | Out-Null
-        Get-ChildItem -Path . -Include *.exe,*.msi -Recurse |
+        Get-ChildItem -Path . -Include *.exe,*.msi,*.dll -Recurse |
           Where-Object { $_.FullName -notmatch '\\packages\\' } |
           ForEach-Object { Copy-Item $_.FullName -Destination build -Force }
         Write-Host "Copied executables:"
