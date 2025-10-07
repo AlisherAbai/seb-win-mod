@@ -17,8 +17,8 @@ jobs:
         dotnet-version: 8.0.x
 
     - name: Install WiX Toolset
-      run: |
-        choco install wixtoolset --version=3.11.2 -y
+      run: choco install wixtoolset -y
+
 
     - name: Restore NuGet packages
       run: nuget restore SafeExamBrowser.sln
